@@ -1249,3 +1249,62 @@ test("can use custom merge function to combine cached and streamed lists", async
 
   await expect(stream).not.toEmitAnything();
 });
+
+test("suppresses terminal hasNext:false emission when streamed fields are @nonreactive (#11616)", async () => {
+  const stream = mockDefer20220824();
+  const client = new ApolloClient({
+    link: stream.httpLink,
+    cache: new InMemoryCache(),
+    incrementalHandler: new Defer20220824Handler(),
+  });
+
+  // All items arrive in the initial chunk, then a terminal hasNext:false
+  // chunk fires the streaming -> ready transition with no data change.
+  const query = gql`
+    query FriendListQuery {
+      friendList @stream(initialCount: 3) {
+        id
+        name @nonreactive
+      }
+    }
+  `;
+
+  const observableStream = new ObservableStream(client.watchQuery({ query }));
+
+  await expect(observableStream).toEmitTypedValue({
+    data: undefined,
+    dataState: "empty",
+    loading: true,
+    networkStatus: NetworkStatus.loading,
+    partial: true,
+  });
+
+  stream.enqueueInitialChunk({
+    data: {
+      friendList: [
+        { __typename: "Friend", id: "1", name: "Luke" },
+        { __typename: "Friend", id: "2", name: "Han" },
+        { __typename: "Friend", id: "3", name: "Leia" },
+      ],
+    },
+    hasNext: true,
+  });
+
+  await expect(observableStream).toEmitTypedValue({
+    data: markAsStreaming({
+      friendList: [
+        { __typename: "Friend", id: "1", name: "Luke" },
+        { __typename: "Friend", id: "2", name: "Han" },
+        { __typename: "Friend", id: "3", name: "Leia" },
+      ],
+    }),
+    dataState: "streaming",
+    loading: true,
+    networkStatus: NetworkStatus.streaming,
+    partial: true,
+  });
+
+  stream.enqueueSubsequentChunk({ hasNext: false });
+
+  await expect(observableStream).not.toEmitAnything();
+});

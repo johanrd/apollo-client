@@ -31,12 +31,30 @@ export function equalByQuery(
   variables?: OperationVariables
 ): boolean {
   return (
-    equal(aRest, bRest) &&
+    equalResultMetadata(aRest, bRest) &&
     equalBySelectionSet(getMainDefinition(query).selectionSet, aData, bData, {
       fragmentMap: createFragmentMap(getFragmentDefinitions(query)),
       variables,
     })
   );
+}
+
+// Tolerate the streaming->complete dataState flip on a `@defer` query's final
+// chunk so a `@nonreactive` opt-out isn't undone by the lifecycle metadata
+// flipping in lockstep. Any other field (e.g. error) must still match exactly.
+function equalResultMetadata(
+  a: Partial<ObservableQuery.Result<unknown>>,
+  b: Partial<ObservableQuery.Result<unknown>>
+): boolean {
+  if (equal(a, b)) return true;
+  if (a.dataState !== "streaming" || b.dataState !== "complete") return false;
+  return equal(a, {
+    ...b,
+    dataState: a.dataState,
+    networkStatus: a.networkStatus,
+    partial: a.partial,
+    loading: a.loading,
+  });
 }
 
 // Encapsulates the information used by equalBySelectionSet that does not change
