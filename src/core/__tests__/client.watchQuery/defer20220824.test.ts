@@ -347,3 +347,117 @@ it.each([["cache-first"], ["no-cache"]] as const)(
     await expect(stream).not.toEmitAnything();
   }
 );
+
+test("suppresses post-defer emission when deferred fields are @nonreactive (#11616)", async () => {
+  const query = gql`
+    query GetPlaylists {
+      featuredPlaylists {
+        edges {
+          node {
+            id
+            ... @defer {
+              ...NameFragment @nonreactive
+            }
+          }
+        }
+      }
+    }
+    fragment NameFragment on Playlist {
+      name
+    }
+  `;
+
+  const defer = mockDefer20220824();
+  const client = new ApolloClient({
+    cache: new InMemoryCache(),
+    link: defer.httpLink,
+    incrementalHandler: new Defer20220824Handler(),
+  });
+
+  const stream = new ObservableStream(client.watchQuery({ query }));
+
+  await expect(stream).toEmitTypedValue({
+    data: undefined,
+    dataState: "empty",
+    loading: true,
+    networkStatus: NetworkStatus.loading,
+    partial: true,
+  });
+
+  defer.enqueueInitialChunk({
+    data: {
+      featuredPlaylists: {
+        __typename: "PlaylistConnection",
+        edges: [
+          {
+            __typename: "PlaylistEdge",
+            node: { __typename: "Playlist", id: "1" },
+          },
+          {
+            __typename: "PlaylistEdge",
+            node: { __typename: "Playlist", id: "2" },
+          },
+        ],
+      },
+    },
+    hasNext: true,
+  });
+
+  await expect(stream).toEmitTypedValue({
+    data: markAsStreaming({
+      featuredPlaylists: {
+        __typename: "PlaylistConnection",
+        edges: [
+          {
+            __typename: "PlaylistEdge",
+            node: { __typename: "Playlist", id: "1" },
+          },
+          {
+            __typename: "PlaylistEdge",
+            node: { __typename: "Playlist", id: "2" },
+          },
+        ],
+      },
+    }),
+    dataState: "streaming",
+    loading: true,
+    networkStatus: NetworkStatus.streaming,
+    partial: true,
+  });
+
+  defer.enqueueSubsequentChunk({
+    incremental: [
+      {
+        data: { name: "Playlist A" },
+        path: ["featuredPlaylists", "edges", 0, "node"],
+      },
+      {
+        data: { name: "Playlist B" },
+        path: ["featuredPlaylists", "edges", 1, "node"],
+      },
+    ],
+    hasNext: false,
+  });
+
+  await expect(stream).not.toEmitAnything();
+
+  // The cache is still updated; only the subscription's re-emission is
+  // suppressed. Sibling reads see the deferred fields.
+  const NameFragment = gql`
+    fragment NameFragment on Playlist {
+      name
+    }
+  `;
+  expect(
+    client.readFragment({
+      id: client.cache.identify({ __typename: "Playlist", id: "1" }),
+      fragment: NameFragment,
+    })
+  ).toEqual({ __typename: "Playlist", name: "Playlist A" });
+  expect(
+    client.readFragment({
+      id: client.cache.identify({ __typename: "Playlist", id: "2" }),
+      fragment: NameFragment,
+    })
+  ).toEqual({ __typename: "Playlist", name: "Playlist B" });
+});
